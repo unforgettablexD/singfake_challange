@@ -32,53 +32,50 @@ class BinaryFocalLoss(nn.Module):
 def main(args):
     # Set the seed for reproducibility
     set_seed(42)
-    
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
-
-    # Create the dataset
+    
+    # Dataset and DataLoader setup
     path = args.base_dir
     train_dataset = SVDD2024(path, partition="train")
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, worker_init_fn=seed_worker)
-    
     dev_dataset = SVDD2024(path, partition="dev")
     dev_loader = DataLoader(dev_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, worker_init_fn=seed_worker)
     
-    # Create the model
     model = SVDDModel(device, frontend=args.encoder).to(device)
-
-    # Create the optimizer
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-9, betas=(0.9, 0.999))
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10, eta_min=1e-6)
-
-    # Create the directory for the logs
-    log_dir = os.path.join(args.log_dir, args.encoder)
-    os.makedirs(log_dir, exist_ok=True)
     
-    # get current time
-    current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_dir = os.path.join(log_dir, current_time)
-    os.makedirs(log_dir, exist_ok=True)
-
-    # Create the summary writer
-    writer = SummaryWriter(log_dir=log_dir)
-    
-    # Create the directory for the checkpoints
-    checkpoint_dir = os.path.join(log_dir, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    
-    # Save config for reproducibility
-    with open(os.path.join(log_dir, "config.json"), "w") as f:
-        f.write(str(vars(args)))
-        
     criterion = BinaryFocalLoss()
+    
+    # Directory setup for logging and checkpoints
+    log_dir = os.path.join(args.log_dir, args.encoder, datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(log_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=log_dir)
+    checkpoint_dir = os.path.join("checkpoint", "aasist_checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    print( f"chekpointdir", checkpoint_dir)
+    
+    # Check for an existing checkpoint
+    checkpoint_path = os.path.join(checkpoint_dir, "latest_checkpoint.pt")
+    print(f"chekcpoint path :",checkpoint_path)
+    start_epoch = 0
+    if os.path.isfile(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch']
+        print(f"Resuming training from epoch {start_epoch}")
     
     best_val_eer = 1.0
 
     # Train the model
-    for epoch in range(args.epochs):
+    #for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         pos_samples, neg_samples = [], []
-        for i, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}")):
+        epoch_progress = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}")
+        for i, batch in enumerate(epoch_progress):
+        #for i, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}")):
             if args.debug and i > 20:
                 break
             x, label, _ = batch
@@ -96,7 +93,23 @@ def main(args):
         scheduler.step()
         writer.add_scalar("LR/train", scheduler.get_last_lr()[0], epoch * len(train_loader) + i)
         writer.add_scalar("EER/train", compute_eer(np.concatenate(pos_samples), np.concatenate(neg_samples))[0], epoch)
-        
+
+         # Checkpoint saving
+        # Save checkpoint every 10 epochs and update the latest checkpoint
+        if (epoch + 1) % 2 == 0 or epoch == args.epochs - 1:
+            checkpoint = {
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_val_eer': best_val_eer
+            }
+            # Save specific epoch checkpoint
+            torch.save(checkpoint, os.path.join(checkpoint_dir, f"model_epoch_{epoch+1}.pt"))
+            # Update latest checkpoint
+            torch.save(checkpoint, checkpoint_path)
+            print(f"Checkpoint saved for epoch {epoch+1}")
+        else  : print(f"checkpoint not saved")
+            
         
         model.eval()
         val_loss = 0
